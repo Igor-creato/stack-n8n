@@ -26,9 +26,9 @@ bash
 bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/stack-n8n/master/secure-ubuntu.sh)
 ```
 
-👉 Подставь вместо <USER> и <REPO> свой GitHub-логин и название репозитория.
 
 📋 Что делает скрипт
+
 ✅ Полное обновление системы и пакетов
 
 ✅ Включение автоматических обновлений (без авто-перезагрузки)
@@ -71,9 +71,8 @@ bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/stack-n8n/master/
 
 Если запускаешь с curl | bash — можно предварительно скачать и сохранить:
 
-bash
-Копировать
-Редактировать
-curl -O https://raw.githubusercontent.com/<USER>/<REPO>/main/secure-ubuntu.sh
+```bash
+curl -O https://raw.githubusercontent.com/Igor-creato/stack-n8n/master/secure-ubuntu.sh
 chmod +x secure-ubuntu.sh
 sudo ./secure-ubuntu.sh
+```
