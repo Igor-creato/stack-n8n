@@ -4,9 +4,9 @@
 set -Eeuo pipefail
 
 # ========== Настройки по умолчанию ==========
-GH_USER_DEFAULT="<GH_USER>"        # <-- ЗАМЕНИ на свой GitHub-юзернейм
-REPO_DEFAULT="secure-ubuntu"       # имя репозитория
-BRANCH_DEFAULT="main"              # ветка/тег
+GH_USER_DEFAULT="Igor-creato"        # <-- ЗАМЕНИ на свой GitHub-юзернейм
+REPO_DEFAULT="stack-n8n"       # имя репозитория
+BRANCH_DEFAULT="master"              # ветка/тег
 RUN_FILE="run.sh"                  # входная точка в репозитории
 
 # Можно переопределить через переменные окружения:
