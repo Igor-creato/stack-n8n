@@ -13,13 +13,13 @@
 Одной командой напрямую из GitHub:
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/Igor-creato/stack-n8n/master/secure-ubuntu.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Igor-creato/stack-n8n/master/installer.sh)
 ```
 
 или с wget:
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/stack-n8n/master/secure-ubuntu.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/stack-n8n/master/installer.sh)
 ```
 
 
