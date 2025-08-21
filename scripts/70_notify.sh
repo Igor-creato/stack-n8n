@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # -------------------------
 
-# Мини-обёртка над Telegram Bot API (x-www-form-urlencoded)
+# Обёртка над Telegram Bot API (x-www-form-urlencoded), без jq
 _tg_api() {
   # _tg_api <method> <data_as_x_www_form_urlencoded>
   # Печатает JSON-ответ; код возврата curl прокидывает наружу
@@ -35,7 +35,7 @@ _tg_last_update_id() {
   grep -oE '"update_id"[[:space:]]*:[[:space:]]*[0-9]+' | tail -n1 | grep -oE '[0-9]+' || true
 }
 
-# Красивые сообщения
+# Цветные сообщения
 info(){ echo -e "\e[32m[INFO]\e[0m $*"; }
 warn(){ echo -e "\e[33m[WARN]\e[0m $*"; }
 error(){ echo -e "\e[31m[ERROR]\e[0m $*" >&2; }
@@ -105,7 +105,7 @@ TG_CHAT_ID='${TG_CHAT_ID}'
 EOF
   chmod 600 /etc/secure-bootstrap.conf
 
-  # 4) Утилита tg-send для произвольных сообщений (годится для ручных тестов)
+  # 4) Утилита tg-send для ручных тестов
   cat >/usr/local/sbin/tg-send <<'EOT'
 #!/usr/bin/env bash
 set -Eeuo pipefail
