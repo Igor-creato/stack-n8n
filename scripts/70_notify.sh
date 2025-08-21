@@ -18,13 +18,13 @@ _tg_api() {
 
 # Возвращает 0, если в stdin есть "ok": true
 _tg_ok() {
-  grep -q '"ok":\s*true' 2>/dev/null
+  grep -q '"ok":[[:space:]]*true' 2>/dev/null
 }
 
 # Достаём chat.id из JSON getUpdates (message/edited_message/channel_post/my_chat_member)
 _tg_extract_chat_id() {
   # читает JSON из stdin, пытается найти "chat":{"id":...} в разных типах событий
-  grep -oE '"(message|edited_message|channel_post|my_chat_member)"\s*:\s*\{[^}]*"chat"\s*:\s*\{\s*"id"\s*:\s*-?[0-9]+' \
+  grep -oE '"(message|edited_message|channel_post|my_chat_member)"[[:space:]]*:[[:space:]]*\{[^}]*"chat"[[:space:]]*:[[:space:]]*\{[[:space:]]*"id"[[:space:]]*:[[:space:]]*-?[0-9]+' \
     | tail -n1 \
     | grep -oE '-?[0-9]+' \
     || return 1
@@ -32,7 +32,7 @@ _tg_extract_chat_id() {
 
 # Берём последний update_id из JSON
 _tg_last_update_id() {
-  grep -oE '"update_id"\s*:\s*[0-9]+' | tail -n1 | grep -oE '[0-9]+' || true
+  grep -oE '"update_id"[[:space:]]*:[[:space:]]*[0-9]+' | tail -n1 | grep -oE '[0-9]+' || true
 }
 
 # Красивые сообщения
@@ -63,9 +63,9 @@ setup_reboot_notify_telegram() {
     warn "Автоопределение chat_id: открой Telegram и напиши боту. Жду до 60 секунд…"
 
     # 2.1) Проверим, не включён ли webhook (409 — конфликт)
-    local resp last_id deadline upd_id
+    local resp last_id deadline upd_id cid
     resp="$(_tg_api "getUpdates" "timeout=0")" || resp=""
-    if echo "$resp" | grep -q '"error_code":\s*409'; then
+    if echo "$resp" | grep -q '"error_code"[[:space:]]*:[[:space:]]*409'; then
       warn "Обнаружен webhook (409). getUpdates недоступен. Введи chat_id вручную либо отключи webhook:
       curl -sS \"https://api.telegram.org/bot${TG_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true\""
     else
