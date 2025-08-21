@@ -4,12 +4,18 @@ set -Eeuo pipefail
 configure_ufw(){
   info "Настраиваю UFW..."
   [[ -f /etc/default/ufw ]] && sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
+
   ufw default deny incoming
   ufw default allow outgoing
+
+  # Веб-порты
   ufw allow 80/tcp
   ufw allow 443/tcp
+
+  # На этапе перекладки открываем ОДНОВРЕМЕННО новый порт и 22 (временно)
   ufw limit ${SSH_PORT}/tcp
-  ufw limit 22/tcp        # оставляем временно для безопасной перекладки
+  ufw limit 22/tcp
+
   ufw logging low
   yes | ufw enable || true
   ufw status verbose
@@ -35,7 +41,7 @@ E
   systemctl daemon-reload || true
   systemctl enable --now fail2ban
 
-  # Ждём, пока fail2ban реально поднимется и создаст сокет (до ~10 сек)
+  # Ждём появления сокета fail2ban (до ~10 сек)
   ok=0
   for i in {1..20}; do
     if systemctl is-active --quiet fail2ban && [[ -S /var/run/fail2ban/fail2ban.sock ]]; then
@@ -50,6 +56,6 @@ E
     exit 1
   fi
 
-  # Информационный статус (не критично)
+  # Инфо-статус (не критично)
   fail2ban-client status sshd || true
 }
