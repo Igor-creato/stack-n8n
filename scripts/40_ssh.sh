@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+
 harden_ssh(){
   info "Ужесточаю SSH и включаю новый порт без обрыва сессии..."
   mkdir -p /etc/ssh/sshd_config.d
@@ -22,8 +23,19 @@ harden_ssh(){
   sshd -t || { error "Конфиг sshd (стадия) некорректен"; rm -f "$F_STAGE"; exit 1; }
   systemctl reload ssh || { error "reload ssh не удался (restart НЕ выполняю)"; rm -f "$F_STAGE"; exit 1; }
 
-  sleep 1
-  ss -tnlp | grep -q ":${SSH_PORT} " || { error "Порт ${SSH_PORT} не слушается"; rm -f "$F_STAGE"; systemctl reload ssh || true; exit 1; }
+  # Ждём, пока sshd начнёт реально слушать НОВЫЙ порт (до ~10 сек)
+  ok=0
+  for i in {1..20}; do
+    if ss -H -tlpn 2>/dev/null | awk -v p=":${SSH_PORT}" '$4 ~ p && /sshd/ {found=1} END{exit found?0:1}'; then
+      ok=1; break
+    fi
+    sleep 0.5
+  done
+  if [[ $ok -ne 1 ]]; then
+    error "Новый порт ${SSH_PORT} не слушается."
+    ss -ltnp | sed -n '1,120p' || true
+    exit 1
+  fi
   info "Порт ${SSH_PORT} поднят, 22-й оставлен временно."
 
   # Финальный конфиг: только новый порт; пароли — если ключа нет

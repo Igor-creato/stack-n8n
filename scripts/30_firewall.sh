@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+
 configure_ufw(){
   info "Настраиваю UFW..."
   [[ -f /etc/default/ufw ]] && sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
@@ -13,6 +14,7 @@ configure_ufw(){
   yes | ufw enable || true
   ufw status verbose
 }
+
 configure_fail2ban(){
   info "Настраиваю Fail2ban..."
   cat >/etc/fail2ban/jail.local <<E
@@ -29,7 +31,25 @@ enabled = true
 port    = ${SSH_PORT}
 logpath = %(sshd_log)s
 E
-  systemctl enable fail2ban
-  systemctl restart fail2ban
+
+  systemctl daemon-reload || true
+  systemctl enable --now fail2ban
+
+  # Ждём, пока fail2ban реально поднимется и создаст сокет (до ~10 сек)
+  ok=0
+  for i in {1..20}; do
+    if systemctl is-active --quiet fail2ban && [[ -S /var/run/fail2ban/fail2ban.sock ]]; then
+      ok=1; break
+    fi
+    sleep 0.5
+  done
+  if [[ $ok -ne 1 ]]; then
+    warn "fail2ban не активен, последние логи:"
+    journalctl -u fail2ban -n 50 --no-pager || true
+    error "Не удалось запустить fail2ban (сокет не появился)."
+    exit 1
+  fi
+
+  # Информационный статус (не критично)
   fail2ban-client status sshd || true
 }
