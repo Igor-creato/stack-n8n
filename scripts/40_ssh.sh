@@ -4,10 +4,19 @@ set -Eeuo pipefail
 harden_ssh(){
   info "Ужесточаю SSH и включаю новый порт без обрыва сессии..."
   mkdir -p /etc/ssh/sshd_config.d
+
+  local MAIN=/etc/ssh/sshd_config
   local F_STAGE=/etc/ssh/sshd_config.d/10-port-staging.conf
   local F_FINAL=/etc/ssh/sshd_config.d/99-hardening.conf
 
-  # Стадия: 22 + новый порт, пароли временно ON (чтобы не запереть себя)
+  # 0) Гарантируем подключение каталога конфигов (иначе наши *.conf не читаются)
+  if ! grep -qE '^\s*Include\s+/etc/ssh/sshd_config\.d/\*' "$MAIN"; then
+    cp "$MAIN" "${MAIN}.bak.$(date +%Y%m%d-%H%M%S)" || true
+    sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' "$MAIN"
+    info "Добавил 'Include /etc/ssh/sshd_config.d/*.conf' в $MAIN"
+  fi
+
+  # 1) Стадия: 22 + новый порт, пароли временно ON (чтобы не запереть себя)
   {
     echo "Port 22"
     echo "Port ${SSH_PORT}"
@@ -21,24 +30,43 @@ harden_ssh(){
   } > "$F_STAGE"
 
   sshd -t || { error "Конфиг sshd (стадия) некорректен"; rm -f "$F_STAGE"; exit 1; }
-  systemctl reload ssh || { error "reload ssh не удался (restart НЕ выполняю)"; rm -f "$F_STAGE"; exit 1; }
+  systemctl reload ssh || { error "reload ssh не удался (restart НЕ выполняю на этом шаге)"; rm -f "$F_STAGE"; exit 1; }
 
-  # Ждём, пока sshd начнёт реально слушать НОВЫЙ порт (до ~10 сек)
-  ok=0
+  # 2) Ждём, пока sshd начнёт реально слушать НОВЫЙ порт (до ~10 сек)
+  local ok=0
   for i in {1..20}; do
-    if ss -H -tlpn 2>/dev/null | awk -v p=":${SSH_PORT}" '$4 ~ p && /sshd/ {found=1} END{exit found?0:1}'; then
+    if ss -H -tlpn 2>/dev/null | awk -v p=":${SSH_PORT}$" '$4 ~ p && /sshd/ {found=1} END{exit found?0:1}'; then
       ok=1; break
     fi
     sleep 0.5
   done
+
+  # 2a) Если reload не помог — пробуем безопасный restart ssh и ждём ещё раз
+  if [[ $ok -ne 1 ]]; then
+    warn "Reload не открыл порт ${SSH_PORT}. Пробую безопасный restart ssh (активные сессии не оборвутся на Ubuntu/Debian)..."
+    systemctl restart ssh
+
+    for i in {1..20}; do
+      if ss -H -tlpn 2>/dev/null | awk -v p=":${SSH_PORT}$" '$4 ~ p && /sshd/ {found=1} END{exit found?0:1}'; then
+        ok=1; break
+      fi
+      sleep 0.5
+    done
+  fi
+
   if [[ $ok -ne 1 ]]; then
     error "Новый порт ${SSH_PORT} не слушается."
-    ss -ltnp | sed -n '1,120p' || true
+    echo "---- Диагностика: активные сокеты sshd ----"
+    ss -ltnp | awk 'NR<200{print}' || true
+    echo "---- Конфиги с директивами Port ----"
+    grep -Hn '^[Pp]ort[[:space:]]' "$MAIN" /etc/ssh/sshd_config.d/*.conf 2>/dev/null || true
+    echo "---- Проверка синтаксиса sshd ----"
+    sshd -t || true
     exit 1
   fi
   info "Порт ${SSH_PORT} поднят, 22-й оставлен временно."
 
-  # Финальный конфиг: только новый порт; пароли — если ключа нет
+  # 3) Финальный конфиг: только новый порт; пароли — если ключа нет
   {
     echo "Port ${SSH_PORT}"
     echo "PubkeyAuthentication yes"
@@ -57,7 +85,7 @@ harden_ssh(){
   sshd -t || { error "Конфиг sshd (финал) некорректен"; exit 1; }
   systemctl reload ssh || { error "reload ssh не удался"; exit 1; }
 
-  # Предложим закрыть 22 в UFW и убрать staging
+  # 4) Предложим закрыть 22 в UFW и убрать staging
   if [[ ${SSH_PORT} -ne 22 ]]; then
     echo
     warn "SSH уже переключён на порт ${SSH_PORT}. 22-й пока открыт в UFW."
