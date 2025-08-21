@@ -2,19 +2,6 @@
 # -----------------------------------------------------------------------------
 #  secure-ubuntu.sh
 #  Базовая защита и стабилизация свежего Ubuntu-сервера.
-#  Делает:
-#   - Полное обновление системы и пакетов
-#   - Включение автоматических (в т.ч. security) обновлений (без автоперезагрузки)
-#   - Настройка UFW: вход запрещён, открыты веб-порты и ВАШ SSH-порт (с лимитом)
-#   - Установка и базовая настройка Fail2ban (защита от брутфорса)
-#   - Усиление SSH (запрет root-входа; пароли можно отключить, если есть ключ)
-#   - Выбор КАСТОМНОГО SSH-порта (с безопасным переключением)
-#   - Создание админ-пользователя (в группе sudo) + опция sudo БЕЗ пароля
-#   - sysctl-харднинг сетевого стека и ядра
-#   - Включение NTP-синхронизации времени
-#   - Персистентные журналы systemd-journald
-#   - (опц.) Telegram-уведомление, если требуется перезагрузка после апдейтов
-#  Скрипт безопасен к повторному запуску и снабжён комментариями.
 # -----------------------------------------------------------------------------
 set -Eeuo pipefail
 
@@ -35,10 +22,13 @@ detect_ubuntu() {
   if [[ "${ID:-}" != "ubuntu" ]]; then
     warn "Скрипт тестировался на Ubuntu 20.04/22.04/24.04. Продолжаем на ваш страх и риск."
   fi
+  if ! command -v sshd >/dev/null 2>&1; then
+    error "sshd не найден. Установите openssh-server: apt-get update && apt-get -y install openssh-server"; exit 1
+  fi
 }
 
+# ====== Пользователь и ключи ======
 prompt_admin_user() {
-  # Создание/подготовка админ-пользователя (в группе sudo).
   read -rp "Имя админ-пользователя (будет создан, если не существует) [deploy]: " USERNAME_RAW
   USERNAME=${USERNAME_RAW:-deploy}
   USERNAME_LOWER=$(echo "$USERNAME" | tr '[:upper:]' '[:lower:]')
@@ -47,8 +37,7 @@ prompt_admin_user() {
     USERNAME="$USERNAME_LOWER"
   fi
   if ! [[ "$USERNAME" =~ ^[a-z][-a-z0-9_]{0,31}$ ]]; then
-    error "Некорректное имя пользователя: '$USERNAME'.
-Разрешены: [a-z][a-z0-9_-], длина 1..32. Пример: deploy, admin, igor"
+    error "Некорректное имя пользователя: '$USERNAME'. Разрешены: [a-z][a-z0-9_-], длина 1..32."
     exit 1
   fi
 
@@ -61,12 +50,10 @@ prompt_admin_user() {
     usermod -aG sudo "$USERNAME" || true
   fi
 
-  # .ssh-папка и права
   mkdir -p "/home/$USERNAME/.ssh"
   chmod 700 "/home/$USERNAME/.ssh"
   chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.ssh"
 
-  # Проверим наличие ключа у самого пользователя
   HAS_KEY=0
   AUTH_KEYS_FILE="/home/$USERNAME/.ssh/authorized_keys"
   if [[ -s "$AUTH_KEYS_FILE" ]] && grep -E -q '^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp256)[[:space:]]' "$AUTH_KEYS_FILE"; then
@@ -74,7 +61,7 @@ prompt_admin_user() {
     HAS_KEY=1
   fi
 
-  # === Перенос ключей от root к новому пользователю (если есть) ===
+  # Перенос ключей от root (если есть)
   ROOT_AUTH_KEYS="/root/.ssh/authorized_keys"
   if [[ -s "$ROOT_AUTH_KEYS" ]]; then
     info "Обнаружены ключи у root. Переношу их к $USERNAME и очищаю у root (с бэкапом)..."
@@ -94,7 +81,7 @@ prompt_admin_user() {
     info "Ключи перенесены. У root файл authorized_keys очищен (бэкап сохранён)."
   fi
 
-  # Если ключа нет — предложим вставить новый (поддержка многострочного SSH2/RFC4716)
+  # Ввод ключа: поддержка OpenSSH 1‑строкой и SSH2 (RFC4716) блоком
   if [[ $HAS_KEY -eq 0 ]]; then
     echo "Вставьте публичный ключ для $USERNAME."
     echo "Можно: одну строку OpenSSH (ssh-ed25519/ssh-rsa/ecdsa-...)"
@@ -110,8 +97,6 @@ prompt_admin_user() {
     if [[ -n "$PUBKEY_RAW" ]]; then
       TMP_IN=$(mktemp); TMP_OUT=$(mktemp)
       printf "%b" "$PUBKEY_RAW" > "$TMP_IN"
-
-      # Если это блок RFC4716 — конвертируем в OpenSSH
       if grep -q "^---- BEGIN SSH2 PUBLIC KEY ----" "$TMP_IN"; then
         if ssh-keygen -i -m RFC4716 -f "$TMP_IN" > "$TMP_OUT" 2>/dev/null; then
           PUBKEY=$(sed -n '1p' "$TMP_OUT")
@@ -120,12 +105,10 @@ prompt_admin_user() {
           error "Не удалось конвертировать SSH2 ключ в OpenSSH."; exit 1
         fi
       else
-        # Возможно уже OpenSSH одной строкой
         PUBKEY=$(head -n1 "$TMP_IN")
       fi
       rm -f "$TMP_IN" "$TMP_OUT"
 
-      # Валидация OpenSSH-формата
       if [[ ! "$PUBKEY" =~ ^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp256)[[:space:]]+ ]]; then
         error "Неверный формат ключа. Нужна строка, начинающаяся с ssh-ed25519/ssh-rsa/ecdsa-sha2-nistp256."
         exit 1
@@ -141,7 +124,6 @@ prompt_admin_user() {
     fi
   fi
 
-  # Опция: sudo без запроса пароля
   read -rp "Разрешить $USERNAME использовать sudo БЕЗ пароля? [y/N]: " NOPASSWD_CHOICE
   if [[ "${NOPASSWD_CHOICE,,}" == "y" ]]; then
     echo "%${USERNAME} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/90-${USERNAME}-nopasswd"
@@ -153,7 +135,6 @@ prompt_admin_user() {
 }
 
 choose_ssh_port() {
-  # Выбор SSH-порта с валидацией
   read -rp "Порт SSH (1-65535, не 80/443) [22]: " SSH_PORT
   SSH_PORT=${SSH_PORT:-22}
   if ! [[ $SSH_PORT =~ ^[0-9]+$ ]] || (( SSH_PORT < 1 || SSH_PORT > 65535 )); then
@@ -165,6 +146,7 @@ choose_ssh_port() {
   info "Выбран SSH-порт: $SSH_PORT"
 }
 
+# ====== Пакеты и обновления ======
 apt_update_upgrade() {
   info "Обновляю индекс пакетов и систему..."
   export DEBIAN_FRONTEND=noninteractive
@@ -177,7 +159,7 @@ apt_update_upgrade() {
 
 install_packages() {
   info "Устанавливаю пакеты: ufw, fail2ban, unattended-upgrades..."
-  apt-get -y install ufw fail2ban unattended-upgrades ca-certificates curl vim || true
+  apt-get -y install ufw fail2ban unattended-upgrades ca-certificates curl vim openssh-server || true
 }
 
 configure_unattended_upgrades() {
@@ -190,7 +172,6 @@ APT::Periodic::Download-Upgradeable-Packages "1";
 APT::Periodic::Verbose "1";
 EOF
 
-  # Авто-перезагрузка отключена
   cat >/etc/apt/apt.conf.d/51unattended-upgrades-local <<'EOF'
 Unattended-Upgrade::Automatic-Reboot "false";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
@@ -199,21 +180,20 @@ EOF
   systemctl restart unattended-upgrades
 }
 
+# ====== UFW / Fail2ban ======
 configure_ufw() {
   info "Настраиваю UFW..."
   [[ -f /etc/default/ufw ]] && sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
   ufw default deny incoming
   ufw default allow outgoing
 
-  # Разрешаем HTTP/HTTPS
+  # Открываем веб-порты
   ufw allow 80/tcp
   ufw allow 443/tcp
 
-  # Безопасное переключение SSH-порта:
+  # Всегда заранее открыть и новый порт, и 22 (стадия безопасного переключения)
   ufw limit ${SSH_PORT}/tcp
-  if [[ ${SSH_PORT} -ne 22 ]]; then
-    ufw limit 22/tcp
-  fi
+  ufw limit 22/tcp
 
   ufw logging low
   yes | ufw enable || true
@@ -222,7 +202,7 @@ configure_ufw() {
 
 configure_fail2ban() {
   info "Настраиваю Fail2ban..."
-  cat >/etc/fail2ban/jail.local <<'EOF'
+  cat >/etc/fail2ban/jail.local <<EOF
 [DEFAULT]
 bantime  = 1h
 findtime = 10m
@@ -233,7 +213,7 @@ ignoreip = 127.0.0.1/8 ::1
 
 [sshd]
 enabled = true
-port    = ssh
+port    = ${SSH_PORT}
 logpath = %(sshd_log)s
 EOF
   systemctl enable fail2ban
@@ -241,10 +221,42 @@ EOF
   fail2ban-client status sshd || true
 }
 
+# ====== SSH: безопасное переключение порта, без рестартов ======
 harden_ssh() {
-  info "Ужесточаю SSH и настраиваю порт..."
+  info "Ужесточаю SSH и включаю новый порт без обрыва сессии..."
+
   mkdir -p /etc/ssh/sshd_config.d
-  local HARDEN_FILE=/etc/ssh/sshd_config.d/99-hardening.conf
+
+  local F_STAGE=/etc/ssh/sshd_config.d/10-port-staging.conf
+  local F_FINAL=/etc/ssh/sshd_config.d/99-hardening.conf
+
+  # 1) Стадия: слушаем ДВА порта (22 и новый), пароли временно включены
+  {
+    echo "Port 22"
+    echo "Port ${SSH_PORT}"
+    echo "PubkeyAuthentication yes"
+    echo "PasswordAuthentication yes"
+    echo "PermitRootLogin prohibit-password"
+    echo "KbdInteractiveAuthentication no"
+    echo "ChallengeResponseAuthentication no"
+    echo "MaxAuthTries 3"
+    echo "UsePAM yes"
+  } > "$F_STAGE"
+
+  if ! sshd -t; then
+    error "Неверная конфигурация sshd (стадия). Откатываю."; rm -f "$F_STAGE"; exit 1
+  fi
+  if ! systemctl reload ssh; then
+    error "sshd reload не удался. Рестарт НЕ выполняю, чтобы не оборвать сессию."; rm -f "$F_STAGE"; exit 1
+  fi
+
+  sleep 1
+  if ! ss -tnlp | grep -q ":${SSH_PORT} "; then
+    error "Новый порт ${SSH_PORT} не слушается. Откатываю staging."; rm -f "$F_STAGE"; systemctl reload ssh || true; exit 1
+  fi
+  info "Новый порт ${SSH_PORT} поднят. 22-й оставлен временно для безопасной проверки входа."
+
+  # 2) Финальный жёсткий конфиг (только новый порт; пароли по наличию ключа)
   {
     echo "Port ${SSH_PORT}"
     echo "PubkeyAuthentication yes"
@@ -258,25 +270,32 @@ harden_ssh() {
     echo "ChallengeResponseAuthentication no"
     echo "MaxAuthTries 3"
     echo "UsePAM yes"
-  } >"${HARDEN_FILE}"
+  } > "$F_FINAL"
 
-  command -v sshd >/dev/null 2>&1 && sshd -t
-  systemctl reload ssh || systemctl restart ssh
+  if ! sshd -t; then
+    error "Неверная конфигурация sshd (финал). Оставляю двухпортовую стадию."; exit 1
+  fi
+  if ! systemctl reload ssh; then
+    error "reload не удался. Оставляю двухпортовую стадию."; exit 1
+  fi
 
-  # Если порт меняли — в конце предложим закрыть 22 сразу
+  # 3) Спросить о закрытии 22 в UFW и убрать staging при подтверждении
   if [[ ${SSH_PORT} -ne 22 ]]; then
     echo
-    warn "SSH переключён на порт ${SSH_PORT}. 22-й пока временно открыт в UFW, чтобы не потерять доступ."
-    read -rp "Проверили новое подключение (ssh -p ${SSH_PORT} ${USERNAME}@IP)? Закрыть 22 сейчас? [y/N]: " CLOSE22
+    warn "SSH уже переключён на порт ${SSH_PORT}. 22-й пока открыт в UFW для безопасности."
+    read -rp "Проверили вход по новому порту (ssh -p ${SSH_PORT} ${USERNAME}@IP)? Закрыть 22 сейчас? [y/N]: " CLOSE22
     if [[ "${CLOSE22,,}" == "y" ]]; then
       ufw delete allow 22/tcp || true
-      info "Порт 22 закрыт в UFW."
+      rm -f "$F_STAGE"
+      info "Порт 22 закрыт и staging-конфиг удалён."
+      systemctl reload ssh || true
     else
-      warn "Оставили 22 открытым. Закройте позже командой: ufw delete allow 22/tcp"
+      warn "Оставили 22 открытым. Закроете позже: ufw delete allow 22/tcp; затем rm -f $F_STAGE && systemctl reload ssh"
     fi
   fi
 }
 
+# ====== Система: sysctl, время, журнал ======
 harden_sysctl() {
   info "Применяю sysctl-харднинг..."
   cat >/etc/sysctl.d/99-hardening.conf <<'EOF'
@@ -326,6 +345,7 @@ persist_journal() {
   systemctl restart systemd-journald
 }
 
+# ====== Telegram-уведомления о требуемой перезагрузке (опция) ======
 setup_reboot_notify_telegram() {
   info "Настраиваю уведомления в Telegram о необходимости перезагрузки (по желанию)..."
   read -rp "Включить Telegram-уведомления при требуемой перезагрузке? [y/N]: " TG_CHOICE
@@ -336,14 +356,12 @@ setup_reboot_notify_telegram() {
   read -rp "Укажи Telegram BOT TOKEN (например, 123456:ABC...): " TG_BOT_TOKEN
   read -rp "Укажи chat_id (число или @username; лучше числовой ID): " TG_CHAT_ID
 
-  # Конфиг
   cat >/etc/secure-bootstrap.conf <<EOF
 TG_BOT_TOKEN='${TG_BOT_TOKEN}'
 TG_CHAT_ID='${TG_CHAT_ID}'
 EOF
   chmod 600 /etc/secure-bootstrap.conf
 
-  # Скрипт отправки
   cat >/usr/local/sbin/reboot-notify-telegram <<'EOS'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -364,11 +382,9 @@ fi
 EOS
   chmod +x /usr/local/sbin/reboot-notify-telegram
 
-  # systemd units: path + service
   cat >/etc/systemd/system/reboot-notify.service <<'EOS'
 [Unit]
 Description=Notify via Telegram when reboot is required
-
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/reboot-notify-telegram
@@ -377,22 +393,15 @@ EOS
   cat >/etc/systemd/system/reboot-notify.path <<'EOS'
 [Unit]
 Description=Watch /var/run/reboot-required and trigger telegram notify
-
 [Path]
 PathExists=/var/run/reboot-required
-
 [Install]
 WantedBy=multi-user.target
 EOS
 
   systemctl daemon-reload
   systemctl enable --now reboot-notify.path
-
-  # Если файл уже существует сейчас — отправим уведомление один раз
-  if [[ -f /var/run/reboot-required ]]; then
-    info "Перезагрузка уже требуется — отправляю уведомление сейчас."
-    systemctl start reboot-notify.service || true
-  fi
+  [[ -f /var/run/reboot-required ]] && systemctl start reboot-notify.service || true
 }
 
 summary() {
@@ -402,13 +411,14 @@ summary() {
   echo "---- Fail2ban (sshd) ----"; fail2ban-client status sshd || true
   echo "---- Важные заметки ----"
   if [[ ${HAS_KEY:-0} -eq 1 ]]; then
-    echo "• Вход по паролю ОТКЛЮЧЁН (есть ключ). Используйте SSH-ключ для пользователя $USERNAME."
+    echo "• Вход по паролю ОТКЛЮЧЁН (есть ключ). Пользователь: $USERNAME."
   else
     echo "• Вход по паролю ОСТАВЛЕН ВКЛЮЧЁННЫМ (ключ не был задан/обнаружен)."
   fi
   echo "• SSH-порт: ${SSH_PORT}."
-  echo "• Открытые порты: ${SSH_PORT}/tcp (limit), 80/tcp, 443/tcp. Остальные входящие закрыты."
+  echo "• Открытые порты: ${SSH_PORT}/tcp (limit), 22/tcp (временно), 80/tcp, 443/tcp."
   echo "• Автообновления включены; авто-перезагрузка ОТКЛЮЧЕНА."
+  echo "• После проверки входа по новому порту можно закрыть 22: ufw delete allow 22/tcp"
 }
 
 main() {
