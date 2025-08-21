@@ -311,7 +311,21 @@ setup_reboot_notify_telegram() {
     return 0
   fi
   read -rp "Укажи Telegram BOT TOKEN (например, 123456:ABC...): " TG_BOT_TOKEN
+  info "Чтобы автоматически определить chat_id, отправь ЛЮБОЕ сообщение своему боту в Telegram, затем подожди пару секунд..."
+sleep 2
+# Пробуем получить chat_id через Telegram Bot API
+TG_CHAT_ID=$(curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/getUpdates"   | tr -d '\n'   | grep -oE '"chat"\s*:\s*\{\s*"id"\s*:\s*-?[0-9]+'   | head -n1   | grep -oE '-?[0-9]+')
+
+if [[ -z "${TG_CHAT_ID:-}" ]]; then
+  warn "Не удалось автоматически определить chat_id. Укажи вручную:"
   read -rp "Укажи chat_id (число или @username; лучше числовой ID): " TG_CHAT_ID
+else
+  info "Обнаружен chat_id: $TG_CHAT_ID"
+  read -rp "Использовать этот chat_id? [Y/n]: " CHAT_OK
+  if [[ "${CHAT_OK,,}" == "n" ]]; then
+    read -rp "Укажи chat_id вручную: " TG_CHAT_ID
+  fi
+fi
 
   # Конфиг
   cat >/etc/secure-bootstrap.conf <<EOF
