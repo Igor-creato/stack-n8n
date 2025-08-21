@@ -13,7 +13,7 @@
 Одной командой напрямую из GitHub:
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/Igor-creato/<REPO>/main/secure-ubuntu.sh)
+bash <(curl -s https://raw.githubusercontent.com/Igor-creato/stack-n8n/master/secure-ubuntu.sh)
 ```
 
 или с wget:
@@ -23,7 +23,7 @@ bash
 Редактировать
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/<REPO>/main/secure-ubuntu.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/stack-n8n/master/secure-ubuntu.sh)
 ```
 
 👉 Подставь вместо <USER> и <REPO> свой GitHub-логин и название репозитория.
