@@ -26,13 +26,16 @@ _tg_extract_chat_id() {
   # читает JSON из stdin, пытается найти "chat":{"id":...} в разных типах событий
   grep -oE '"(message|edited_message|channel_post|my_chat_member)"[[:space:]]*:[[:space:]]*\{[^}]*"chat"[[:space:]]*:[[:space:]]*\{[[:space:]]*"id"[[:space:]]*:[[:space:]]*-?[0-9]+' \
     | tail -n1 \
-    | grep -oE '-?[0-9]+' \
+    | grep -oE -- '-?[0-9]+' \
     || return 1
 }
 
 # Берём последний update_id из JSON
 _tg_last_update_id() {
-  grep -oE '"update_id"[[:space:]]*:[[:space:]]*[0-9]+' | tail -n1 | grep -oE '[0-9]+' || true
+  grep -oE '"update_id"[[:space:]]*:[[:space:]]*[0-9]+' \
+    | tail -n1 \
+    | grep -oE -- '[0-9]+' \
+    || true
 }
 
 # Цветные сообщения
