@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+_is_valid_pubkey_line() {
+  # Разрешаем базовые форматы OpenSSH
+  [[ "$1" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256)[[:space:]]+ ]]
+}
+
 prompt_admin_user(){
   read -rp "Имя админ-пользователя (будет создан, если не существует) [deploy]: " USERNAME_RAW
   USERNAME=${USERNAME_RAW:-deploy}; USERNAME=$(echo "$USERNAME" | tr '[:upper:]' '[:lower:]')
@@ -15,22 +20,47 @@ prompt_admin_user(){
     usermod -aG sudo "$USERNAME" || true
   fi
 
-  install -d -m 700 -o "$USERNAME" -g "$USERNAME" "/home/$USERNAME/.ssh"
-  AUTH_KEYS_FILE="/home/$USERNAME/.ssh/authorized_keys"; HAS_KEY=0
-  [[ -s "$AUTH_KEYS_FILE" ]] && grep -Eq '^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp256)[[:space:]]' "$AUTH_KEYS_FILE" && HAS_KEY=1
+  # Базовая гигиена аккаунта
+  chsh -s /bin/bash "$USERNAME" || true
+  usermod -U "$USERNAME" || true
 
-  # Перенос ключей root → пользователь
-  if [[ -s /root/.ssh/authorized_keys ]]; then
-    info "Переношу ключи от root к $USERNAME (с бэкапом) и очищаю у root..."
-    touch "$AUTH_KEYS_FILE"; chmod 600 "$AUTH_KEYS_FILE"; chown "$USERNAME:$USERNAME" "$AUTH_KEYS_FILE"
-    while IFS= read -r line; do [[ -n "$line" ]] && ! grep -Fxq "$line" "$AUTH_KEYS_FILE" && echo "$line" >> "$AUTH_KEYS_FILE"; done < /root/.ssh/authorized_keys
-    chmod 600 "$AUTH_KEYS_FILE"; chown "$USERNAME:$USERNAME" "$AUTH_KEYS_FILE"; HAS_KEY=1
-    ts=$(date +%Y%m%d-%H%M%S); install -d -m 700 /root/.ssh/backup
-    cp /root/.ssh/authorized_keys "/root/.ssh/backup/authorized_keys.$ts.bak" || true
-    : > /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys
+  install -d -m 700 -o "$USERNAME" -g "$USERNAME" "/home/$USERNAME/.ssh"
+  AUTH_KEYS_FILE="/home/$USERNAME/.ssh/authorized_keys"
+  touch "$AUTH_KEYS_FILE"; chmod 600 "$AUTH_KEYS_FILE"; chown "$USERNAME:$USERNAME" "$AUTH_KEYS_FILE"
+
+  # Считаем валидные ключи у пользователя
+  HAS_KEY=0
+  if grep -Eq '^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp256)[[:space:]]' "$AUTH_KEYS_FILE"; then
+    HAS_KEY=1
   fi
 
-  # Приём ключа: OpenSSH одной строкой ИЛИ блок SSH2 (RFC4716) с автоконверсией
+  # Переносим ТОЛЬКО валидные openSSH ключи из /root, если они есть
+  if [[ -s /root/.ssh/authorized_keys ]]; then
+    info "Пробую перенести валидные ключи от root к $USERNAME..."
+    TMP=$(mktemp)
+    # Фильтруем валидные строки
+    while IFS= read -r line; do
+      _is_valid_pubkey_line "$line" && echo "$line"
+    done < /root/.ssh/authorized_keys > "$TMP"
+
+    if [[ -s "$TMP" ]]; then
+      while IFS= read -r line; do
+        [[ -n "$line" ]] && ! grep -Fxq "$line" "$AUTH_KEYS_FILE" && echo "$line" >> "$AUTH_KEYS_FILE"
+      done < "$TMP"
+      chown "$USERNAME:$USERNAME" "$AUTH_KEYS_FILE"; chmod 600 "$AUTH_KEYS_FILE"
+      info "Валидные ключи перенесены."
+      HAS_KEY=1
+      # Очищаем root только если действительно перенесли что-то
+      ts=$(date +%Y%m%d-%H%M%S); install -d -m 700 /root/.ssh/backup
+      cp /root/.ssh/authorized_keys "/root/.ssh/backup/authorized_keys.$ts.bak" || true
+      : > /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys
+    else
+      warn "У root не найдено валидных OpenSSH-ключей. Ничего не переносил."
+    fi
+    rm -f "$TMP"
+  fi
+
+  # Если ключей по-прежнему нет — принимаем ввод: OpenSSH 1 строка ИЛИ блок RFC4716 (SSH2)
   if [[ $HAS_KEY -eq 0 ]]; then
     echo "Вставьте ключ: однострочный OpenSSH (ssh-ed25519/ssh-rsa/ecdsa-...)"
     echo "или блок SSH2 (RFC4716) «BEGIN...END». Завершение ввода — пустая строка или Ctrl+D."
@@ -45,8 +75,10 @@ prompt_admin_user(){
         PUB=$(head -n1 "$IN")
       fi
       rm -f "$IN" "$OUT"
-      [[ "$PUB" =~ ^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp256)[[:space:]]+ ]] || { error "Неверный формат ключа"; exit 1; }
-      echo "$PUB" >> "$AUTH_KEYS_FILE"; chmod 600 "$AUTH_KEYS_FILE"; chown "$USERNAME:$USERNAME" "$AUTH_KEYS_FILE"; HAS_KEY=1
+      _is_valid_pubkey_line "$PUB" || { error "Неверный формат ключа"; exit 1; }
+      echo "$PUB" >> "$AUTH_KEYS_FILE"
+      chown "$USERNAME:$USERNAME" "$AUTH_KEYS_FILE"; chmod 600 "$AUTH_KEYS_FILE"
+      HAS_KEY=1
       info "SSH-ключ добавлен в $AUTH_KEYS_FILE."
     else
       warn "Ключ не задан — вход по паролю временно останется включён."
