@@ -37,21 +37,10 @@ detect_ubuntu() {
 }
 
 prompt_admin_user() {
-  # Запрос и автоприведение к нижнему регистру
-  read -rp "Имя админ-пользователя (будет создан, если не существует) [deploy]: " USERNAME_RAW
-  USERNAME=${USERNAME_RAW:-deploy}
-  USERNAME_LOWER=$(echo "$USERNAME" | tr '[:upper:]' '[:lower:]')
-  if [[ "$USERNAME" != "$USERNAME_LOWER" ]]; then
-    warn "Имена пользователей в Linux обычно строчные. Преобразую: $USERNAME -> $USERNAME_LOWER"
-    USERNAME="$USERNAME_LOWER"
-  fi
-
-  # Явная валидация: начинается с буквы, затем буквы/цифры/_/-, длина до 32
-  if ! [[ "$USERNAME" =~ ^[a-z][-a-z0-9_]{0,31}$ ]]; then
-    error "Некорректное имя пользователя: '$USERNAME'.
-Разрешены: [a-z][a-z0-9_-], длина 1..32. Пример: deploy, admin, igor"
-    exit 1
-  fi
+  # Создание/подготовка админ-пользователя (в группе sudo). Пароль можно не задавать
+  # при входе по ключу. Можно включить sudo без пароля (по желанию).
+  read -rp "Имя админ-пользователя (будет создан, если не существует) [deploy]: " USERNAME
+  USERNAME=${USERNAME:-deploy}
 
   if ! id "$USERNAME" &>/dev/null; then
     info "Создаю пользователя $USERNAME и добавляю в sudo..."
@@ -61,8 +50,6 @@ prompt_admin_user() {
     info "Пользователь $USERNAME уже существует. Добавляю в sudo (если ещё нет)..."
     usermod -aG sudo "$USERNAME" || true
   fi
-
-}
 
   # .ssh-папка и права
   mkdir -p "/home/$USERNAME/.ssh"
@@ -324,21 +311,7 @@ setup_reboot_notify_telegram() {
     return 0
   fi
   read -rp "Укажи Telegram BOT TOKEN (например, 123456:ABC...): " TG_BOT_TOKEN
-  info "Чтобы автоматически определить chat_id, отправь ЛЮБОЕ сообщение своему боту в Telegram, затем подожди пару секунд..."
-sleep 2
-# Пробуем получить chat_id через Telegram Bot API
-TG_CHAT_ID=$(curl -s "https://api.telegram.org/bot${TG_BOT_TOKEN}/getUpdates"   | tr -d '\n'   | grep -oE '"chat"\s*:\s*\{\s*"id"\s*:\s*-?[0-9]+'   | head -n1   | grep -oE '-?[0-9]+')
-
-if [[ -z "${TG_CHAT_ID:-}" ]]; then
-  warn "Не удалось автоматически определить chat_id. Укажи вручную:"
   read -rp "Укажи chat_id (число или @username; лучше числовой ID): " TG_CHAT_ID
-else
-  info "Обнаружен chat_id: $TG_CHAT_ID"
-  read -rp "Использовать этот chat_id? [Y/n]: " CHAT_OK
-  if [[ "${CHAT_OK,,}" == "n" ]]; then
-    read -rp "Укажи chat_id вручную: " TG_CHAT_ID
-  fi
-fi
 
   # Конфиг
   cat >/etc/secure-bootstrap.conf <<EOF
@@ -416,7 +389,5 @@ main() {
   setup_reboot_notify_telegram
   summary
 }
-
-main "$@"
 
 main "$@"
