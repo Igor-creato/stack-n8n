@@ -7,6 +7,8 @@ set -Eeuo pipefail
 
 # Обёртка над Telegram Bot API (x-www-form-urlencoded), без jq
 _tg_api() {
+  # _tg_api <method> <data_as_x_www_form_urlencoded>
+  # Печатает JSON-ответ; код возврата curl прокидывает наружу
   local method="$1"; shift || true
   local data="${*:-}"
   curl -fsS -m 20 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/${method}" \
@@ -19,8 +21,9 @@ _tg_ok() {
   grep -q '"ok":[[:space:]]*true' 2>/dev/null
 }
 
-# Достаём chat.id из JSON getUpdates
+# Достаём chat.id из JSON getUpdates (message/edited_message/channel_post/my_chat_member)
 _tg_extract_chat_id() {
+  # читает JSON из stdin, пытается найти "chat":{"id":...} в разных типах событий
   grep -oE '"(message|edited_message|channel_post|my_chat_member)"[[:space:]]*:[[:space:]]*\{[^}]*"chat"[[:space:]]*:[[:space:]]*\{[[:space:]]*"id"[[:space:]]*:[[:space:]]*-?[0-9]+' \
     | tail -n1 \
     | grep -oE -- '-?[0-9]+' \
@@ -54,18 +57,55 @@ setup_reboot_notify_telegram() {
     error "BOT TOKEN пуст. Прерываю настройку Telegram."; return 1
   fi
 
-  # 2) Попробуем автоматически определить chat_id
-  local resp
-  resp="$(_tg_api "getUpdates" "timeout=0")" || resp=""
-  TG_CHAT_ID="$(_tg_extract_chat_id <<<"$resp" || true)"
+  # 2) chat_id: автоопределение через getUpdates с очисткой очереди и длинным опросом
+  warn "Автоопределение chat_id: открой Telegram и напиши боту. Жду до 60 секунд…"
 
-  if [[ -n "${TG_CHAT_ID:-}" ]]; then
-    info "Автоматически определён chat_id: ${TG_CHAT_ID}"
+  local resp last_id deadline upd_id cid
+  resp="$(_tg_api "getUpdates" "timeout=0")" || resp=""
+
+  # 2.1) Проверим, не включён ли webhook (409 — конфликт)
+  if echo "$resp" | grep -q '"error_code"[[:space:]]*:[[:space:]]*409'; then
+    warn "Обнаружен webhook (409). getUpdates недоступен.
+Отключи webhook командой:
+  curl -sS \"https://api.telegram.org/bot${TG_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true\"
+и запусти настройку ещё раз."
   else
-    warn "Не удалось автоматически найти chat_id. Убедись, что написал боту сообщение."
+    # 2.2) Если прямо сейчас в ответе уже есть chat_id — используем его
+    if cid="$(_tg_extract_chat_id <<<"$resp")"; then
+      TG_CHAT_ID="$cid"
+      info "Определён chat_id из текущих апдейтов: ${TG_CHAT_ID}"
+    else
+      # 2.3) Очистим старые апдейты, чтобы ждать ТОЛЬКО новые
+      last_id="$(_tg_last_update_id <<<"$resp")"
+      if [[ -n "$last_id" ]]; then
+        _tg_api "getUpdates" "offset=$((last_id+1))&timeout=0" >/dev/null 2>&1 || true
+      fi
+
+      # 2.4) Длинный опрос: до 60 сек, каждые ~15 сек
+      deadline=$((SECONDS + 60))
+      while (( SECONDS < deadline )); do
+        resp="$(_tg_api "getUpdates" "timeout=15")" || resp=""
+        if echo "$resp" | _tg_ok; then
+          if cid="$(_tg_extract_chat_id <<<"$resp")"; then
+            TG_CHAT_ID="$cid"
+            info "Определён chat_id: ${TG_CHAT_ID}"
+            # сдвинем offset, чтобы не крутиться на одних и тех же апдейтах
+            upd_id="$(_tg_last_update_id <<<"$resp")"
+            [[ -n "$upd_id" ]] && _tg_api "getUpdates" "offset=$((upd_id+1))&timeout=0" >/dev/null 2>&1 || true
+            break
+          fi
+          upd_id="$(_tg_last_update_id <<<"$resp")"
+          [[ -n "$upd_id" ]] && _tg_api "getUpdates" "offset=$((upd_id+1))&timeout=0" >/dev/null 2>&1 || true
+        fi
+      done
+    fi
+  fi
+
+  if [[ -z "${TG_CHAT_ID:-}" ]]; then
+    warn "Не удалось определить chat_id автоматически."
     echo "Укажи chat_id (например, 123456789 или -100xxxxxxxxxx)."
     read -rp "chat_id: " TG_CHAT_ID
-    [[ -n "${TG_CHAT_ID:-}" ]] || { error "chat_id пуст. Прерываю настройку."; return 1; }
+    [[ -n "${TG_CHAT_ID:-}" ]] || { error "chat_id по-прежнему пуст. Прерываю настройку Telegram."; return 1; }
   fi
 
   # 3) Сохранить конфиг
@@ -88,7 +128,7 @@ curl -fsS -m 20 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage
 EOT
   chmod +x /usr/local/sbin/tg-send
 
-  # 5) Скрипт уведомления о необходимости перезагрузки
+  # 5) Скрипт: уведомление о необходимости перезагрузки
   cat >/usr/local/sbin/reboot-notify-telegram <<'EOS'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -109,7 +149,7 @@ fi
 EOS
   chmod +x /usr/local/sbin/reboot-notify-telegram
 
-  # 6) systemd units
+  # 6) systemd units (watcher на /var/run/reboot-required)
   cat >/etc/systemd/system/reboot-notify.service <<'EOS'
 [Unit]
 Description=Notify via Telegram when reboot is required
@@ -133,29 +173,30 @@ EOS
   systemctl daemon-reload
   systemctl enable --now reboot-notify.path
 
-  # 7) Тестовое сообщение
-  local host msg resp2
+  # 7) ТЕСТОВОЕ СООБЩЕНИЕ (всегда URL-кодируем поля!)
+  local host msg resp_test
   host="$(hostname -f 2>/dev/null || hostname)"
   msg="✅ Тестовое сообщение: бот подключен на ${host} ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
 
-  resp2="$(
+  resp_test="$(
     curl -fsS -m 20 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
       -H 'Content-Type: application/x-www-form-urlencoded' \
       --data-urlencode "chat_id=${TG_CHAT_ID}" \
       --data-urlencode "text=${msg}"
-  )" || resp2=""
+  )" || resp_test=""
 
-  if echo "$resp2" | _tg_ok; then
+  if echo "$resp_test" | _tg_ok; then
     info "Тестовое сообщение отправлено в Telegram (chat_id=${TG_CHAT_ID}). Проверь чат."
     install -d -m 755 /var/lib/reboot-notify-telegram
     : > /var/lib/reboot-notify-telegram/verified
   else
     warn "Не удалось отправить тестовое сообщение. Ответ API:"
-    echo "$resp2" | sed -n '1,200p'
-    warn "Проверь BOT TOKEN и chat_id."
+    echo "$resp_test" | sed -n '1,200p'
+    warn "Проверь BOT TOKEN и chat_id. При необходимости повтори настройку."
   fi
 }
 
+# Если скрипт запускают напрямую — выполняем настройку
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   setup_reboot_notify_telegram
 fi
