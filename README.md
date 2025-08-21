@@ -18,10 +18,6 @@ bash <(curl -s https://raw.githubusercontent.com/Igor-creato/stack-n8n/master/se
 
 или с wget:
 
-bash
-Копировать
-Редактировать
-
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/Igor-creato/stack-n8n/master/secure-ubuntu.sh)
 ```
